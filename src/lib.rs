@@ -7,9 +7,14 @@ use builder::S3Builder;
 use bytes::Bytes;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use error::Error;
-use futures::{stream::BoxStream, TryStreamExt};
+use futures::{
+    stream::{self, BoxStream},
+    TryStreamExt,
+};
 use multipart::MultiPartUpload;
-use object_store::{multipart::WriteMultiPart, GetResultPayload, ObjectMeta, ObjectStore};
+use object_store::{
+    multipart::WriteMultiPart, GetResultPayload, ListResult, ObjectMeta, ObjectStore,
+};
 use tokio::io::AsyncWrite;
 
 pub mod builder;
@@ -214,13 +219,95 @@ impl ObjectStore for S3 {
         &self,
         prefix: Option<&object_store::path::Path>,
     ) -> object_store::Result<BoxStream<'_, object_store::Result<object_store::ObjectMeta>>> {
-        unimplemented!()
+        let request = self.client.list_objects_v2().bucket(self.bucket.clone());
+        let request = match prefix {
+            Some(prefix) => request.prefix(prefix.to_string()),
+            None => request,
+        };
+        let response = request.send().await.map_err(Error::from)?;
+        match response.contents {
+            Some(contents) => Ok(Box::pin(stream::iter(contents.into_iter().map(|object| {
+                let last_modified = DateTime::from_naive_utc_and_offset(
+                    NaiveDateTime::from_timestamp_millis(
+                        object
+                            .last_modified()
+                            .ok_or(Error::Unknown)?
+                            .to_millis()
+                            .map_err(Error::from)?,
+                    )
+                    .ok_or(Error::Unknown)?,
+                    Utc,
+                );
+                Ok(ObjectMeta {
+                    location: object
+                        .key
+                        .ok_or(object_store::Error::Generic {
+                            store: "aws",
+                            source: Box::new(Error::Unknown),
+                        })?
+                        .into(),
+                    last_modified,
+                    size: object.size as usize,
+                    e_tag: object.e_tag,
+                })
+            })))),
+            None => Ok(Box::pin(stream::empty())),
+        }
     }
+
     async fn list_with_delimiter(
         &self,
         prefix: Option<&object_store::path::Path>,
     ) -> object_store::Result<object_store::ListResult> {
-        unimplemented!()
+        let request = self.client.list_objects_v2().bucket(self.bucket.clone());
+        let request = match prefix {
+            Some(prefix) => request.prefix(prefix.to_string()),
+            None => request,
+        };
+        let response = request.send().await.map_err(Error::from)?;
+        let objects = match response.contents {
+            Some(contents) => contents
+                .into_iter()
+                .map(|object| {
+                    let last_modified = DateTime::from_naive_utc_and_offset(
+                        NaiveDateTime::from_timestamp_millis(
+                            object
+                                .last_modified()
+                                .ok_or(Error::Unknown)?
+                                .to_millis()
+                                .map_err(Error::from)?,
+                        )
+                        .ok_or(Error::Unknown)?,
+                        Utc,
+                    );
+                    Ok(ObjectMeta {
+                        location: object
+                            .key
+                            .ok_or(object_store::Error::Generic {
+                                store: "aws",
+                                source: Box::new(Error::Unknown),
+                            })?
+                            .into(),
+                        last_modified,
+                        size: object.size as usize,
+                        e_tag: object.e_tag,
+                    })
+                })
+                .collect::<Result<Vec<_>, object_store::Error>>()?,
+            None => Vec::new(),
+        };
+        Ok(ListResult {
+            objects,
+            common_prefixes: response
+                .common_prefixes
+                .and_then(|prefixes| {
+                    prefixes
+                        .into_iter()
+                        .map(|x| x.prefix.map(|y| y.into()))
+                        .collect::<Option<Vec<_>>>()
+                })
+                .unwrap_or(Vec::new()),
+        })
     }
     async fn put(
         &self,
