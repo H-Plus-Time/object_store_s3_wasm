@@ -5,8 +5,9 @@ use aws_sdk_s3::{
     operation::{
         abort_multipart_upload::AbortMultipartUploadError,
         complete_multipart_upload::CompleteMultipartUploadError, copy_object::CopyObjectError,
-        create_multipart_upload::CreateMultipartUploadError, get_object::GetObjectError,
-        head_object::HeadObjectError, put_object::PutObjectError, upload_part::UploadPartError,
+        create_multipart_upload::CreateMultipartUploadError, delete_object::DeleteObjectError,
+        get_object::GetObjectError, head_object::HeadObjectError, put_object::PutObjectError,
+        upload_part::UploadPartError,
     },
     primitives::SdkBody,
 };
@@ -38,6 +39,8 @@ pub enum Error {
     S3PutObject(#[from] SdkError<PutObjectError, http::response::Response<SdkBody>>),
     #[error("S3 copy object error")]
     S3CopyObject(#[from] SdkError<CopyObjectError, http::response::Response<SdkBody>>),
+    #[error("S3 delete object error")]
+    S3DeleteObject(#[from] SdkError<DeleteObjectError, http::response::Response<SdkBody>>),
     #[error("S3 conversion error")]
     S3Conversion(#[from] aws_smithy_types::date_time::ConversionError),
     #[error("Parse int error")]

@@ -77,7 +77,14 @@ impl ObjectStore for S3 {
         })
     }
     async fn delete(&self, location: &object_store::path::Path) -> object_store::Result<()> {
-        unimplemented!()
+        self.client
+            .delete_object()
+            .bucket(self.bucket.clone())
+            .key(location.to_string())
+            .send()
+            .await
+            .map_err(Error::from)?;
+        Ok(())
     }
     async fn get_opts(
         &self,
