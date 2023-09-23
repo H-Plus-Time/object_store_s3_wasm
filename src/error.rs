@@ -3,6 +3,7 @@ use std::convert::Infallible;
 use aws_sdk_s3::{
     error::SdkError,
     operation::{
+        abort_multipart_upload::AbortMultipartUploadError,
         complete_multipart_upload::CompleteMultipartUploadError,
         create_multipart_upload::CreateMultipartUploadError, head_object::HeadObjectError,
         put_object::PutObjectError, upload_part::UploadPartError,
@@ -26,6 +27,10 @@ pub enum Error {
     #[error("S3 complete multipart error")]
     S3CompleteMultipart(
         #[from] SdkError<CompleteMultipartUploadError, http::response::Response<SdkBody>>,
+    ),
+    #[error("S3 abort multipart error")]
+    S3AbortMultipart(
+        #[from] SdkError<AbortMultipartUploadError, http::response::Response<SdkBody>>,
     ),
     #[error("S3 put object error")]
     S3PutObject(#[from] SdkError<PutObjectError, http::response::Response<SdkBody>>),

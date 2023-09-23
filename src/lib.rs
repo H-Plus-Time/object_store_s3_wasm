@@ -38,7 +38,15 @@ impl ObjectStore for S3 {
         location: &object_store::path::Path,
         multipart_id: &object_store::MultipartId,
     ) -> object_store::Result<()> {
-        unimplemented!()
+        self.client
+            .abort_multipart_upload()
+            .bucket(self.bucket.clone())
+            .key(location.to_string())
+            .upload_id(multipart_id)
+            .send()
+            .await
+            .map_err(Error::from)?;
+        Ok(())
     }
     async fn copy(
         &self,
