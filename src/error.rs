@@ -5,7 +5,7 @@ use aws_sdk_s3::{
     operation::{
         complete_multipart_upload::CompleteMultipartUploadError,
         create_multipart_upload::CreateMultipartUploadError, head_object::HeadObjectError,
-        upload_part::UploadPartError,
+        put_object::PutObjectError, upload_part::UploadPartError,
     },
     primitives::SdkBody,
 };
@@ -27,6 +27,8 @@ pub enum Error {
     S3CompleteMultipart(
         #[from] SdkError<CompleteMultipartUploadError, http::response::Response<SdkBody>>,
     ),
+    #[error("S3 put object error")]
+    S3PutObject(#[from] SdkError<PutObjectError, http::response::Response<SdkBody>>),
     #[error("S3 conversion error")]
     S3Conversion(#[from] aws_smithy_types::date_time::ConversionError),
     #[error("Parse int error")]

@@ -114,7 +114,15 @@ impl ObjectStore for S3 {
         location: &object_store::path::Path,
         bytes: Bytes,
     ) -> object_store::Result<()> {
-        unimplemented!()
+        self.client
+            .put_object()
+            .bucket(self.bucket.clone())
+            .key(location.to_string())
+            .body(bytes.into())
+            .send()
+            .await
+            .map_err(Error::from)?;
+        Ok(())
     }
     async fn put_multipart(
         &self,
