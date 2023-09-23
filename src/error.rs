@@ -5,8 +5,8 @@ use aws_sdk_s3::{
     operation::{
         abort_multipart_upload::AbortMultipartUploadError,
         complete_multipart_upload::CompleteMultipartUploadError,
-        create_multipart_upload::CreateMultipartUploadError, head_object::HeadObjectError,
-        put_object::PutObjectError, upload_part::UploadPartError,
+        create_multipart_upload::CreateMultipartUploadError, get_object::GetObjectError,
+        head_object::HeadObjectError, put_object::PutObjectError, upload_part::UploadPartError,
     },
     primitives::SdkBody,
 };
@@ -32,7 +32,9 @@ pub enum Error {
     S3AbortMultipart(
         #[from] SdkError<AbortMultipartUploadError, http::response::Response<SdkBody>>,
     ),
-    #[error("S3 put object error")]
+    #[error("S3 get object error")]
+    S3GetObject(#[from] SdkError<GetObjectError, http::response::Response<SdkBody>>),
+    #[error("S3 conversion error")]
     S3PutObject(#[from] SdkError<PutObjectError, http::response::Response<SdkBody>>),
     #[error("S3 conversion error")]
     S3Conversion(#[from] aws_smithy_types::date_time::ConversionError),

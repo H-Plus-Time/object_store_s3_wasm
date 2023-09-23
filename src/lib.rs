@@ -1,4 +1,4 @@
-use std::{fmt::Display, sync::Arc};
+use std::{fmt::Display, num::ParseIntError, ops::Range, sync::Arc};
 
 use async_trait::async_trait;
 use aws_config::SdkConfig;
@@ -7,9 +7,9 @@ use builder::S3Builder;
 use bytes::Bytes;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use error::Error;
-use futures::stream::BoxStream;
+use futures::{stream::BoxStream, TryStreamExt};
 use multipart::MultiPartUpload;
-use object_store::{multipart::WriteMultiPart, ObjectMeta, ObjectStore};
+use object_store::{multipart::WriteMultiPart, GetResultPayload, ObjectMeta, ObjectStore};
 use tokio::io::AsyncWrite;
 
 pub mod builder;
@@ -72,7 +72,93 @@ impl ObjectStore for S3 {
         location: &object_store::path::Path,
         options: object_store::GetOptions,
     ) -> object_store::Result<object_store::GetResult> {
-        unimplemented!()
+        let request = self
+            .client
+            .get_object()
+            .bucket(self.bucket.clone())
+            .key(location.to_string());
+        let request = match options.if_match {
+            Some(if_match) => request.if_match(if_match),
+            None => request,
+        };
+        let request = match options.if_none_match {
+            Some(if_none_match) => request.if_none_match(if_none_match),
+            None => request,
+        };
+        let request = match options.if_modified_since {
+            Some(if_modified_since) => {
+                let date_time = aws_smithy_types::DateTime::from_millis(
+                    if_modified_since
+                        .signed_duration_since::<Utc>(DateTime::from_naive_utc_and_offset(
+                            NaiveDateTime::from_timestamp_opt(0, 0).unwrap(),
+                            Utc,
+                        ))
+                        .num_milliseconds(),
+                );
+                request.if_modified_since(date_time)
+            }
+            None => request,
+        };
+        let request = match options.if_unmodified_since {
+            Some(if_unmodified_since) => {
+                let date_time = aws_smithy_types::DateTime::from_millis(
+                    if_unmodified_since
+                        .signed_duration_since::<Utc>(DateTime::from_naive_utc_and_offset(
+                            NaiveDateTime::from_timestamp_opt(0, 0).unwrap(),
+                            Utc,
+                        ))
+                        .num_milliseconds(),
+                );
+                request.if_modified_since(date_time)
+            }
+            None => request,
+        };
+        let request = match options.range {
+            Some(range) => request.range(
+                "bytes=".to_string() + &range.start.to_string() + "-" + &range.end.to_string(),
+            ),
+            None => request,
+        };
+        let response = request.send().await.map_err(Error::from)?;
+        let last_modified = DateTime::from_naive_utc_and_offset(
+            NaiveDateTime::from_timestamp_millis(
+                response
+                    .last_modified()
+                    .ok_or(Error::Unknown)?
+                    .to_millis()
+                    .map_err(Error::from)?,
+            )
+            .ok_or(Error::Unknown)?,
+            Utc,
+        );
+        let size = response.content_length() as usize;
+        let range = response
+            .content_range
+            .ok_or(Error::Unknown)?
+            .trim_start_matches("bytes=")
+            .split("-")
+            .map(|x| x.parse::<usize>())
+            .collect::<Result<Vec<_>, ParseIntError>>()
+            .map_err(Error::from)?;
+
+        Ok(object_store::GetResult {
+            payload: GetResultPayload::Stream(Box::pin(response.body.map_err(|err| {
+                object_store::Error::Generic {
+                    store: "aws_smithy",
+                    source: Box::new(err),
+                }
+            }))),
+            meta: ObjectMeta {
+                location: location.to_string().into(),
+                last_modified,
+                size,
+                e_tag: response.e_tag,
+            },
+            range: Range {
+                start: range[0],
+                end: range[1],
+            },
+        })
     }
     async fn head(
         &self,
