@@ -53,12 +53,24 @@ impl ObjectStore for S3 {
         from: &object_store::path::Path,
         to: &object_store::path::Path,
     ) -> object_store::Result<()> {
-        unimplemented!()
+        let mut source_bucket_and_object: String = "".to_owned();
+        source_bucket_and_object.push_str(&self.bucket);
+        source_bucket_and_object.push('/');
+        source_bucket_and_object.push_str(from.as_ref());
+        self.client
+            .copy_object()
+            .copy_source(source_bucket_and_object)
+            .bucket(self.bucket.clone())
+            .key(to.to_string())
+            .send()
+            .await
+            .map_err(Error::from)?;
+        Ok(())
     }
     async fn copy_if_not_exists(
         &self,
-        from: &object_store::path::Path,
-        to: &object_store::path::Path,
+        _from: &object_store::path::Path,
+        _to: &object_store::path::Path,
     ) -> object_store::Result<()> {
         Err(object_store::Error::NotSupported {
             source: Box::new(Error::Unknown),
