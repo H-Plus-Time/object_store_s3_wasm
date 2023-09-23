@@ -14,7 +14,8 @@ aws-types = { version = "0.56.1", default-features = false }
 bytes = "1.5"
 chrono = "0.4"
 futures = "0.3"
+getrandom = { version = "0.2.10", features = ["js"] }
 http = "0.2"
-object_store = "0.7"
+object_store = { version = "0.7", default-features = false, features = ["cloud"] }
 thiserror = "1"
 tokio = "1"

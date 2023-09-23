@@ -1,4 +1,7 @@
-use std::ops::{Deref, DerefMut};
+use std::{
+    ops::{Deref, DerefMut},
+    sync::Arc,
+};
 
 use aws_sdk_s3::Client;
 use aws_types::sdk_config::Builder;
@@ -14,7 +17,7 @@ impl S3Builder {
     pub fn build(self) -> Result<S3, Error> {
         let sdk_config = self.config.build();
         Ok(S3 {
-            client: Client::new(&sdk_config),
+            client: Arc::new(Client::new(&sdk_config)),
             bucket: self.bucket.ok_or(Error::Unknown)?,
         })
     }

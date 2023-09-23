@@ -1,6 +1,14 @@
 use std::convert::Infallible;
 
-use aws_sdk_s3::{error::SdkError, operation::head_object::HeadObjectError, primitives::SdkBody};
+use aws_sdk_s3::{
+    error::SdkError,
+    operation::{
+        complete_multipart_upload::CompleteMultipartUploadError,
+        create_multipart_upload::CreateMultipartUploadError, head_object::HeadObjectError,
+        upload_part::UploadPartError,
+    },
+    primitives::SdkBody,
+};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -9,8 +17,20 @@ pub enum Error {
     S3Infallible(#[from] SdkError<Infallible, http::response::Response<SdkBody>>),
     #[error("S3 head object error")]
     S3Head(#[from] SdkError<HeadObjectError, http::response::Response<SdkBody>>),
+    #[error("S3 uploadpart object error")]
+    S3UploadPart(#[from] SdkError<UploadPartError, http::response::Response<SdkBody>>),
+    #[error("S3 create multipart error")]
+    S3CreateMultipart(
+        #[from] SdkError<CreateMultipartUploadError, http::response::Response<SdkBody>>,
+    ),
+    #[error("S3 complete multipart error")]
+    S3CompleteMultipart(
+        #[from] SdkError<CompleteMultipartUploadError, http::response::Response<SdkBody>>,
+    ),
     #[error("S3 conversion error")]
     S3Conversion(#[from] aws_smithy_types::date_time::ConversionError),
+    #[error("Parse int error")]
+    ParseInt(#[from] std::num::ParseIntError),
     #[error("unknown object store error")]
     Unknown,
 }

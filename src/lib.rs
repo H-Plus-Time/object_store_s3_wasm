@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::{fmt::Display, sync::Arc};
 
 use async_trait::async_trait;
 use aws_config::SdkConfig;
@@ -8,15 +8,17 @@ use bytes::Bytes;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use error::Error;
 use futures::stream::BoxStream;
-use object_store::{ObjectMeta, ObjectStore};
+use multipart::MultiPartUpload;
+use object_store::{multipart::WriteMultiPart, ObjectMeta, ObjectStore};
 use tokio::io::AsyncWrite;
 
 pub mod builder;
 mod error;
+mod multipart;
 
 #[derive(Debug)]
 pub struct S3 {
-    client: Client,
+    client: Arc<Client>,
     bucket: String,
 }
 
@@ -121,7 +123,26 @@ impl ObjectStore for S3 {
         object_store::MultipartId,
         Box<dyn AsyncWrite + Unpin + Send>,
     )> {
-        unimplemented!()
+        let response = self
+            .client
+            .create_multipart_upload()
+            .bucket(self.bucket.clone())
+            .key(location.to_string())
+            .send()
+            .await
+            .map_err(Error::from)?;
+
+        let multipart_upload = Box::new(WriteMultiPart::new(
+            MultiPartUpload {
+                bucket: self.bucket.clone(),
+                location: location.to_string(),
+                upload_id: response.upload_id.clone().ok_or(Error::Unknown)?,
+                client: self.client.clone(),
+            },
+            16,
+        ));
+
+        Ok((response.upload_id.ok_or(Error::Unknown)?, multipart_upload))
     }
 }
 
