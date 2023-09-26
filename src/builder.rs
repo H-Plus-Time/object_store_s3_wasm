@@ -1,14 +1,16 @@
+use std::panic;
 use std::{ops::Deref, sync::Arc, time::SystemTime};
 
 use async_trait::async_trait;
-use aws_config::SdkConfig;
-use aws_credential_types::{provider::SharedCredentialsProvider, Credentials};
+use aws_credential_types::{
+    cache::CredentialsCache, provider::SharedCredentialsProvider, Credentials,
+};
 use aws_sdk_s3::{
-    config::{AsyncSleep, Region, SharedAsyncSleep, Sleep},
+    config::{AsyncSleep, Config, Region, SharedAsyncSleep, Sleep},
     primitives::SdkBody,
     Client,
 };
-use aws_smithy_async::time::TimeSource;
+use aws_smithy_async::time::{SharedTimeSource, TimeSource};
 use aws_smithy_http::result::ConnectorError;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_timer::UNIX_EPOCH;
@@ -27,26 +29,27 @@ pub struct S3Builder {
 
 impl S3Builder {
     pub fn build(self) -> Result<S3, Error> {
+        panic::set_hook(Box::new(console_error_panic_hook::hook));
         let access_key_id = self.access_key_id.ok_or(Error::Unknown)?;
         let secret_access_key = self.secret_access_key.ok_or(Error::Unknown)?;
         let session_token = self.session_token;
-        let credentials = Credentials::new(
+        let credentials = Credentials::from_keys(
             access_key_id.deref(),
             secret_access_key.deref(),
             session_token,
-            None,
-            "object_store",
         );
-        let mut builder = SdkConfig::builder()
+        let mut builder = Config::builder()
+            .force_path_style(true)
             .region(self.region.map(|x| Region::new(x)))
             .credentials_provider(SharedCredentialsProvider::new(credentials))
+            .credentials_cache(CredentialsCache::no_caching())
             .sleep_impl(SharedAsyncSleep::new(BrowserSleep))
-            .time_source(BrowserNow)
+            .time_source(SharedTimeSource::new(BrowserNow))
             .http_connector(Adapter::new(access_key_id == "access_key"));
         builder.set_endpoint_url(self.endpoint);
         let sdk_config = builder.build();
         Ok(S3 {
-            client: Arc::new(Client::new(&sdk_config)),
+            client: Arc::new(Client::from_conf(sdk_config)),
             bucket: self.bucket.ok_or(Error::Unknown)?,
         })
     }
