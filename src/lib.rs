@@ -1,7 +1,6 @@
 use std::{fmt::Display, num::ParseIntError, ops::Range, sync::Arc};
 
 use async_trait::async_trait;
-use aws_config::SdkConfig;
 use aws_sdk_s3::Client;
 use builder::S3Builder;
 use bytes::Bytes;
@@ -29,10 +28,7 @@ pub struct S3 {
 
 impl S3 {
     pub fn builder() -> S3Builder {
-        S3Builder {
-            config: SdkConfig::builder(),
-            bucket: None,
-        }
+        S3Builder::default()
     }
 }
 
