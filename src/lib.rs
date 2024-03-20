@@ -4,15 +4,16 @@ use async_trait::async_trait;
 use aws_sdk_s3::Client;
 use builder::S3Builder;
 use bytes::Bytes;
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
 use error::Error;
 use futures::{
     stream::{self, BoxStream},
-    TryStreamExt,
+    TryFutureExt, TryStreamExt,
 };
 use multipart::MultiPartUpload;
 use object_store::{
-    multipart::WriteMultiPart, GetResultPayload, ListResult, ObjectMeta, ObjectStore,
+    multipart::WriteMultiPart, GetResultPayload, ListResult, ObjectMeta, ObjectStore, PutOptions,
+    PutResult,
 };
 use tokio::io::AsyncWrite;
 
@@ -109,10 +110,7 @@ impl ObjectStore for S3 {
             Some(if_modified_since) => {
                 let date_time = aws_smithy_types::DateTime::from_millis(
                     if_modified_since
-                        .signed_duration_since::<Utc>(DateTime::from_naive_utc_and_offset(
-                            NaiveDateTime::from_timestamp_opt(0, 0).unwrap(),
-                            Utc,
-                        ))
+                        .signed_duration_since::<Utc>(DateTime::from_timestamp(0, 0).unwrap())
                         .num_milliseconds(),
                 );
                 request.if_modified_since(date_time)
@@ -123,10 +121,7 @@ impl ObjectStore for S3 {
             Some(if_unmodified_since) => {
                 let date_time = aws_smithy_types::DateTime::from_millis(
                     if_unmodified_since
-                        .signed_duration_since::<Utc>(DateTime::from_naive_utc_and_offset(
-                            NaiveDateTime::from_timestamp_opt(0, 0).unwrap(),
-                            Utc,
-                        ))
+                        .signed_duration_since::<Utc>(DateTime::from_timestamp(0, 0).unwrap())
                         .num_milliseconds(),
                 );
                 request.if_modified_since(date_time)
@@ -134,23 +129,20 @@ impl ObjectStore for S3 {
             None => request,
         };
         let request = match options.range {
-            Some(range) => request.range(
+            Some(object_store::GetRange::Bounded(range)) => request.range(
                 "bytes=".to_string() + &range.start.to_string() + "-" + &range.end.to_string(),
             ),
-            None => request,
+            _ => request,
         };
         let response = request.send().await.map_err(Error::from)?;
-        let last_modified = DateTime::from_naive_utc_and_offset(
-            NaiveDateTime::from_timestamp_millis(
-                response
-                    .last_modified()
-                    .ok_or(Error::Unknown)?
-                    .to_millis()
-                    .map_err(Error::from)?,
-            )
-            .ok_or(Error::Unknown)?,
-            Utc,
-        );
+        let last_modified = DateTime::from_timestamp_millis(
+            response
+                .last_modified()
+                .ok_or(Error::Unknown)?
+                .to_millis()
+                .map_err(Error::from)?,
+        )
+        .unwrap();
         let size = response.content_length() as usize;
         let range = response
             .content_range
@@ -173,6 +165,7 @@ impl ObjectStore for S3 {
                 last_modified,
                 size,
                 e_tag: response.e_tag,
+                version: None,
             },
             range: Range {
                 start: range[0],
@@ -192,63 +185,69 @@ impl ObjectStore for S3 {
             .send()
             .await
             .map_err(Error::from)?;
-        let last_modified = DateTime::from_naive_utc_and_offset(
-            NaiveDateTime::from_timestamp_millis(
-                output
-                    .last_modified()
-                    .ok_or(Error::Unknown)?
-                    .to_millis()
-                    .map_err(Error::from)?,
-            )
-            .ok_or(Error::Unknown)?,
-            Utc,
-        );
+        let last_modified = DateTime::from_timestamp_millis(
+            output
+                .last_modified()
+                .ok_or(Error::Unknown)?
+                .to_millis()
+                .map_err(Error::from)?,
+        )
+        .unwrap();
         let meta = ObjectMeta {
             location: location.clone(),
             last_modified,
             size: output.content_length() as usize,
             e_tag: output.e_tag().map(|x| x.to_string()),
+            version: None,
         };
         Ok(meta)
     }
-    async fn list(
+    fn list(
         &self,
         prefix: Option<&object_store::path::Path>,
-    ) -> object_store::Result<BoxStream<'_, object_store::Result<object_store::ObjectMeta>>> {
+    ) -> BoxStream<'_, object_store::Result<object_store::ObjectMeta>> {
         let request = self.client.list_objects_v2().bucket(self.bucket.clone());
         let request = match prefix {
             Some(prefix) => request.prefix(prefix.to_string()),
             None => request,
         };
-        let response = request.send().await.map_err(Error::from)?;
-        match response.contents {
-            Some(contents) => Ok(Box::pin(stream::iter(contents.into_iter().map(|object| {
-                let last_modified = DateTime::from_naive_utc_and_offset(
-                    NaiveDateTime::from_timestamp_millis(
-                        object
-                            .last_modified()
-                            .ok_or(Error::Unknown)?
-                            .to_millis()
-                            .map_err(Error::from)?,
-                    )
-                    .ok_or(Error::Unknown)?,
-                    Utc,
-                );
-                Ok(ObjectMeta {
-                    location: object
-                        .key
-                        .ok_or(object_store::Error::Generic {
-                            store: "aws",
-                            source: Box::new(Error::Unknown),
-                        })?
-                        .into(),
-                    last_modified,
-                    size: object.size as usize,
-                    e_tag: object.e_tag,
+        Box::pin(
+            request
+                .send()
+                .map_err(|_| object_store::Error::from(Error::Unknown))
+                .and_then(|response| async {
+                    match response.contents {
+                        Some(contents) => {
+                            Ok(Box::pin(stream::iter(contents.into_iter().map(|object| {
+                                let last_modified = DateTime::from_timestamp_millis(
+                                    object
+                                        .last_modified()
+                                        .ok_or(Error::Unknown)?
+                                        .to_millis()
+                                        .map_err(Error::from)?,
+                                )
+                                .unwrap();
+                                Ok(ObjectMeta {
+                                    location: object
+                                        .key
+                                        .ok_or(object_store::Error::Generic {
+                                            store: "aws",
+                                            source: Box::new(Error::Unknown),
+                                        })?
+                                        .into(),
+                                    last_modified,
+                                    size: object.size as usize,
+                                    e_tag: object.e_tag,
+                                    version: None,
+                                })
+                            }))) as BoxStream<_>)
+                        }
+                        None => Ok(Box::pin(stream::empty()) as BoxStream<_>),
+                    }
                 })
-            })))),
-            None => Ok(Box::pin(stream::empty())),
-        }
+                .try_flatten_stream()
+                .into_stream(),
+        )
     }
 
     async fn list_with_delimiter(
@@ -265,17 +264,14 @@ impl ObjectStore for S3 {
             Some(contents) => contents
                 .into_iter()
                 .map(|object| {
-                    let last_modified = DateTime::from_naive_utc_and_offset(
-                        NaiveDateTime::from_timestamp_millis(
-                            object
-                                .last_modified()
-                                .ok_or(Error::Unknown)?
-                                .to_millis()
-                                .map_err(Error::from)?,
-                        )
-                        .ok_or(Error::Unknown)?,
-                        Utc,
-                    );
+                    let last_modified = DateTime::from_timestamp_millis(
+                        object
+                            .last_modified()
+                            .ok_or(Error::Unknown)?
+                            .to_millis()
+                            .map_err(Error::from)?,
+                    )
+                    .unwrap();
                     Ok(ObjectMeta {
                         location: object
                             .key
@@ -287,6 +283,7 @@ impl ObjectStore for S3 {
                         last_modified,
                         size: object.size as usize,
                         e_tag: object.e_tag,
+                        version: None,
                     })
                 })
                 .collect::<Result<Vec<_>, object_store::Error>>()?,
@@ -305,20 +302,26 @@ impl ObjectStore for S3 {
                 .unwrap_or(Vec::new()),
         })
     }
-    async fn put(
+    async fn put_opts(
         &self,
         location: &object_store::path::Path,
         bytes: Bytes,
-    ) -> object_store::Result<()> {
-        self.client
+        opts: PutOptions,
+    ) -> object_store::Result<PutResult> {
+        let result = self
+            .client
             .put_object()
             .bucket(self.bucket.clone())
             .key(location.to_string())
             .body(bytes.into())
+            .tagging(opts.tags.encoded())
             .send()
             .await
             .map_err(Error::from)?;
-        Ok(())
+        Ok(PutResult {
+            e_tag: result.e_tag,
+            version: result.version_id,
+        })
     }
     async fn put_multipart(
         &self,
