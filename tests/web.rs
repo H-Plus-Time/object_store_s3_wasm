@@ -37,8 +37,6 @@ async fn it_works() {
 
     let objects = s3
         .list(None)
-        .await
-        .expect("Failed to list objects")
         .try_collect::<Vec<_>>()
         .await
         .expect("Failed to list objects");
