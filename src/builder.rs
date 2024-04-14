@@ -1,4 +1,5 @@
 use std::panic;
+use std::str::FromStr;
 use std::{ops::Deref, sync::Arc, time::SystemTime};
 
 use async_trait::async_trait;
@@ -15,7 +16,87 @@ use aws_smithy_http::result::ConnectorError;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_timer::UNIX_EPOCH;
 
+use serde::{Serialize, Deserialize};
+use snafu::{OptionExt, ResultExt, Snafu};
 use crate::{error::Error, S3};
+use itertools::Itertools;
+
+#[derive(Debug, Snafu)]
+#[allow(missing_docs)]
+enum ConfigError {
+    #[snafu(display("Configuration key: '{}' is not known.", key))]
+    UnknownConfigurationKey { key: String },
+
+    #[snafu(display(
+        "Unknown url scheme cannot be parsed into storage location: {}",
+        scheme
+    ))]
+    UnknownUrlScheme { scheme: String },
+
+    #[snafu(display("URL did not match any known pattern for scheme: {}", url))]
+    UrlNotRecognised { url: String },
+
+    #[snafu(display("Unable parse source url. Url: {}, Error: {}", url, source))]
+    UnableToParseUrl {
+        source: url::ParseError,
+        url: String,
+    },
+}
+
+impl From<ConfigError> for object_store::Error {
+    fn from(source: ConfigError) -> Self {
+        match source {
+            ConfigError::UnknownConfigurationKey { key } => {
+                Self::UnknownConfigurationKey { store: crate::STORE, key }
+            }
+            _ => Self::Generic {
+                store: crate::STORE,
+                source: Box::new(source),
+            },
+        }
+    }
+}
+
+#[derive(PartialEq, Eq, Hash, Clone, Debug, Copy, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum AmazonS3ConfigKey {
+    AccessKeyId,
+    SecretAccessKey,
+    Region,
+    SessionToken,
+    Bucket,
+    Endpoint,
+
+}
+
+impl AsRef<str> for AmazonS3ConfigKey {
+    fn as_ref(&self) -> &str {
+        match self {
+            Self::AccessKeyId => "aws_access_key_id",
+            Self::SecretAccessKey => "aws_secret_access_key",
+            Self::Region => "aws_region",
+            Self::Bucket => "aws_bucket",
+            Self::Endpoint => "aws_endpoint",
+            Self::SessionToken => "aws_session_token",
+        }
+    }
+}
+
+impl FromStr for AmazonS3ConfigKey {
+    type Err = object_store::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "aws_access_key_id" | "access_key_id" => Ok(Self::AccessKeyId),
+            "aws_secret_access_key" | "secret_access_key" => Ok(Self::SecretAccessKey),
+            "aws_region" | "region" => Ok(Self::Region),
+            "aws_bucket" | "aws_bucket_name" | "bucket_name" | "bucket" => Ok(Self::Bucket),
+            "aws_endpoint_url" | "aws_endpoint" | "endpoint_url" | "endpoint" => Ok(Self::Endpoint),
+            "aws_session_token" | "aws_token" | "session_token" | "token" => Ok(Self::SessionToken),
+            _ => Err(ConfigError::UnknownConfigurationKey { key: s.into() }.into()),
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct S3Builder {
@@ -25,10 +106,64 @@ pub struct S3Builder {
     pub(crate) secret_access_key: Option<String>,
     pub(crate) session_token: Option<String>,
     pub(crate) endpoint: Option<String>,
+    pub(crate) url: Option<String>,
 }
 
 impl S3Builder {
-    pub fn build(self) -> Result<S3, Error> {
+    pub fn new() -> S3Builder {
+        Self::default()
+    }
+    pub fn with_url(mut self, url: impl Into<String>) -> Self {
+        self.url = Some(url.into());
+        self
+    }
+
+    /// Set an option on the builder via a key - value pair.
+    pub fn with_config(mut self, key: AmazonS3ConfigKey, value: impl Into<String>) -> Self {
+        match key {
+            AmazonS3ConfigKey::AccessKeyId => self.access_key_id = Some(value.into()),
+            AmazonS3ConfigKey::SecretAccessKey => self.secret_access_key = Some(value.into()),
+            AmazonS3ConfigKey::Region => self.region = Some(value.into()),
+            AmazonS3ConfigKey::Bucket => self.bucket = Some(value.into()),
+            AmazonS3ConfigKey::Endpoint => self.endpoint = Some(value.into()),
+            AmazonS3ConfigKey::SessionToken => self.session_token = Some(value.into()),
+        };
+        self
+    }
+
+    fn parse_url(&mut self, url: &str) -> object_store::Result<()> {
+        let parsed = url::Url::parse(url).context(UnableToParseUrlSnafu { url })?;
+        let host = parsed.host_str().context(UrlNotRecognisedSnafu { url })?;
+        match parsed.scheme() {
+            "s3" | "s3a" => self.bucket = Some(host.to_string()),
+            "https" => match host.splitn(4, '.').collect_tuple() {
+                Some(("s3", region, "amazonaws", "com")) => {
+                    self.region = Some(region.to_string());
+                    let bucket = parsed.path_segments().into_iter().flatten().next();
+                    if let Some(bucket) = bucket {
+                        self.bucket = Some(bucket.into());
+                    }
+                }
+                Some((account, "r2", "cloudflarestorage", "com")) => {
+                    self.region = Some("auto".to_string());
+                    let endpoint = format!("https://{account}.r2.cloudflarestorage.com");
+                    self.endpoint = Some(endpoint);
+
+                    let bucket = parsed.path_segments().into_iter().flatten().next();
+                    if let Some(bucket) = bucket {
+                        self.bucket = Some(bucket.into());
+                    }
+                }
+                _ => return Err(UrlNotRecognisedSnafu { url }.build().into()),
+            },
+            scheme => return Err(UnknownUrlSchemeSnafu { scheme }.build().into()),
+        };
+        Ok(())
+    }
+    pub fn build(mut self) -> Result<S3, object_store::Error> {
+        if let Some(url) = self.url.take() {
+            self.parse_url(&url)?;
+        }
         panic::set_hook(Box::new(console_error_panic_hook::hook));
         let access_key_id = self.access_key_id.ok_or(Error::Unknown)?;
         let secret_access_key = self.secret_access_key.ok_or(Error::Unknown)?;

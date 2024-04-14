@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use aws_sdk_s3::Client;
 use builder::S3Builder;
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use error::Error;
 use futures::{
     stream::{self, BoxStream},
@@ -13,13 +13,16 @@ use futures::{
 use multipart::MultiPartUpload;
 use object_store::{
     multipart::WriteMultiPart, GetResultPayload, ListResult, ObjectMeta, ObjectStore, PutOptions,
-    PutResult,
+    PutResult, GetRange
 };
 use tokio::io::AsyncWrite;
 
 pub mod builder;
 mod error;
 mod multipart;
+mod utils;
+const STORE: &str = "S3";
+
 
 #[derive(Debug)]
 pub struct S3 {
@@ -128,31 +131,40 @@ impl ObjectStore for S3 {
             }
             None => request,
         };
-        let request = match options.range {
-            Some(object_store::GetRange::Bounded(range)) => request.range(
-                "bytes=".to_string() + &range.start.to_string() + "-" + &range.end.to_string(),
-            ),
-            _ => request,
+        let request = if let Some(range) = options.range {
+            let range = match range {
+                GetRange::Bounded(range) => {
+                    format!("bytes={}-{}", range.start, range.end.saturating_sub(1))
+                }
+                GetRange::Offset(offset) => {
+                    format!("bytes={}-", offset)
+                }
+                GetRange::Suffix(upper_limit) => format!("bytes=0-{}", upper_limit),
+            };
+            request.range(range)
+        } else {
+            request
         };
         let response = request.send().await.map_err(Error::from)?;
-        let last_modified = DateTime::from_timestamp_millis(
+        let last_modified = Utc.timestamp_millis_opt(
             response
                 .last_modified()
                 .ok_or(Error::Unknown)?
                 .to_millis()
-                .map_err(Error::from)?,
-        )
-        .unwrap();
+                .map_err(Error::from)?
+        ).unwrap();
         let size = response.content_length() as usize;
+        // TODO: restore the original error handling in the case that
+        // the content_range *is* present
         let range = response
             .content_range
-            .ok_or(Error::Unknown)?
+            // .ok_or(Error::Unknown)?
+            .or(Some(format!("0-{}", size))).unwrap()
             .trim_start_matches("bytes=")
             .split("-")
             .map(|x| x.parse::<usize>())
             .collect::<Result<Vec<_>, ParseIntError>>()
             .map_err(Error::from)?;
-
         Ok(object_store::GetResult {
             payload: GetResultPayload::Stream(Box::pin(response.body.map_err(|err| {
                 object_store::Error::Generic {
